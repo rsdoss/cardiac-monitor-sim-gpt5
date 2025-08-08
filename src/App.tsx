@@ -9,7 +9,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Canvas / ECG rendering constants
 const SAMPLE_RATE = 500; // Hz
-const BUFFER_SECONDS = 120; // seconds of pre-generated data per rhythm
+const BUFFER_SECONDS = 180; // seconds of pre-generated data per rhythm
 
 // Visual scale tuning (not real mm)
 const GRID_MINOR_PX = 10; // minor box
@@ -60,53 +60,73 @@ type GeneratedBuffer = {
   rPeaks: number[]; // indices of R-peaks (for sync markers)
 };
 
-// Generate regular beat ECG (P-QRS-T) with tunable HR and QRS width
+// Generate more realistic P-QRS-T cycles with beat-to-beat variability
 function generateRegularECG(
   seconds: number,
   hr: number,
   qrsWidthMs: number,
-  opts?: { pWave?: boolean; tWave?: boolean; amp?: number }
+  opts?: { pWave?: boolean; tWave?: boolean; amp?: number; prMsMin?: number; prMsMax?: number }
 ): GeneratedBuffer {
   const samples = Math.floor(seconds * SAMPLE_RATE);
   const arr = new Float32Array(samples);
   const rPeaks: number[] = [];
 
-  const cycleSec = 60 / hr;
-  const cycleSamples = Math.max(20, Math.floor(cycleSec * SAMPLE_RATE));
-
-  const amp = opts?.amp ?? 1.0;
   const showP = opts?.pWave !== false;
   const showT = opts?.tWave !== false;
+  const baseAmp = opts?.amp ?? 1.0;
+  const prMin = opts?.prMsMin ?? 120;
+  const prMax = opts?.prMsMax ?? 200;
 
-  // Approximate timings within a cycle
-  const pCenter = 0.2; // as fraction of cycle
-  const qrsCenter = 0.3;
-  const tCenter = 0.6;
+  let tSec = 0;
+  const baseHr = hr;
+  while (tSec * SAMPLE_RATE < samples) {
+    const beatHr = clamp(jitter(baseHr, 0.03), 45, 190);
+    const cycleSec = 60 / beatHr;
+    const base = Math.floor(tSec * SAMPLE_RATE);
 
-  const qrsSigma = (qrsWidthMs / 1000) * SAMPLE_RATE * 0.28; // fudge factor for width
+    // Intervals (ms)
+    const prMs = clamp(randRange(prMin, prMax), 80, 260);
+    const qrsMs = clamp(jitter(qrsWidthMs, 0.08), 50, 160);
+    const qtMs = clamp(400 * Math.sqrt(60 / beatHr), 280, 460);
 
-  for (let k = 0; k * cycleSamples < samples; k++) {
-    const base = k * cycleSamples;
+    // Amplitudes
+    const amp = jitter(baseAmp, 0.06);
+    const pAmp = 0.14 * amp;
+    const rAmp = 1.05 * amp;
+    const sAmp = -0.25 * amp;
+    const qAmp = -0.12 * amp;
+    const tAmp = 0.32 * amp;
 
-    // P wave (small, positive)
-    if (showP) addGaussian(arr, base + pCenter * cycleSamples, 0.18 * amp, 0.03 * cycleSamples);
+    // Convert ms to samples
+    const prS = Math.floor((prMs / 1000) * SAMPLE_RATE);
+    const qrsS = Math.floor((qrsMs / 1000) * SAMPLE_RATE);
+    const qtS = Math.floor((qtMs / 1000) * SAMPLE_RATE);
 
-    // QRS complex: tiny Q, big R, tiny S
-    addGaussian(arr, base + (qrsCenter - 0.02) * cycleSamples, -0.18 * amp, qrsSigma * 0.5);
-    addGaussian(arr, base + qrsCenter * cycleSamples, 1.1 * amp, qrsSigma);
-    addGaussian(arr, base + (qrsCenter + 0.02) * cycleSamples, -0.28 * amp, qrsSigma * 0.6);
+    // Centers
+    const pCenter = base + Math.max(6, Math.floor(prS * 0.55));
+    const qrsCenter = base + prS;
+    const tCenter = base + prS + Math.floor(qtS * 0.65);
 
-    // T wave (broad, positive)
-    if (showT) addGaussian(arr, base + tCenter * cycleSamples, 0.35 * amp, 0.07 * cycleSamples);
+    // P wave
+    if (showP) addGaussian(arr, pCenter, pAmp, Math.max(3, Math.floor(qrsS * 0.35)));
 
-    // Track R-peak index
-    const rIdx = Math.round(base + qrsCenter * cycleSamples);
-    rPeaks.push(rIdx);
+    // QRS complex
+    addGaussian(arr, qrsCenter - Math.floor(qrsS * 0.35), qAmp, Math.max(2, Math.floor(qrsS * 0.28)));
+    addGaussian(arr, qrsCenter, rAmp, Math.max(3, Math.floor(qrsS * 0.55)));
+    addGaussian(arr, qrsCenter + Math.floor(qrsS * 0.35), sAmp, Math.max(2, Math.floor(qrsS * 0.32)));
+
+    // T wave
+    if (showT) addGaussian(arr, tCenter, tAmp, Math.max(6, Math.floor(qtS * 0.22)));
+
+    rPeaks.push(qrsCenter);
+    tSec += cycleSec;
   }
 
-  // Baseline noise
+  // Baseline noise & drift
+  let drift = 0;
   for (let i = 0; i < samples; i++) {
-    arr[i] += randRange(-0.02, 0.02);
+    if (i % 800 === 0) drift = clamp(jitter(drift, 0.2) + randRange(-0.02, 0.02), -0.2, 0.2);
+    arr[i] += drift * 0.002 + randRange(-0.02, 0.02);
   }
 
   return { buffer: arr, rPeaks };
@@ -125,16 +145,16 @@ function generateAfibRvr(seconds: number, meanHr = 150): GeneratedBuffer {
     arr[i] += 0.08 * Math.sin(2 * Math.PI * fHz * t) + randRange(-0.03, 0.03);
   }
 
-  // Irregularly irregular R-Rs
+  // Irregularly irregular R-Rs (no P waves)
   const meanRR = 60 / meanHr; // sec
   let t = 0;
   while (t * SAMPLE_RATE < samples) {
-    const rr = Math.max(0.28, Math.min(0.9, randRange(meanRR - 0.18, meanRR + 0.18)));
+    const rr = clamp(randRange(meanRR - 0.22, meanRR + 0.22), 0.28, 1.1);
     const rIndex = Math.floor(t * SAMPLE_RATE);
-    // Narrow-ish QRS
-    addGaussian(arr, rIndex - 6, -0.12, 4);
-    addGaussian(arr, rIndex, 0.9, 6);
-    addGaussian(arr, rIndex + 6, -0.2, 5);
+    const qrsS = Math.floor((randRange(70, 100) / 1000) * SAMPLE_RATE);
+    addGaussian(arr, rIndex - Math.floor(qrsS * 0.35), -0.12, Math.max(2, Math.floor(qrsS * 0.3)));
+    addGaussian(arr, rIndex, randRange(0.8, 1.0), Math.max(3, Math.floor(qrsS * 0.55)));
+    addGaussian(arr, rIndex + Math.floor(qrsS * 0.35), -0.2, Math.max(2, Math.floor(qrsS * 0.32)));
     rPeaks.push(rIndex);
     // Modest T
     addGaussian(arr, rIndex + Math.floor(0.22 * SAMPLE_RATE), 0.25, 20);
@@ -193,16 +213,23 @@ function generateVT(seconds: number, hr = 170): GeneratedBuffer {
   const cycleSec = 60 / hr;
   const cycleSamples = Math.max(20, Math.floor(cycleSec * SAMPLE_RATE));
 
+  // Occasionally insert capture/fusion beats
+  const captureEvery = Math.max(6, Math.floor(randRange(8, 16)));
   for (let k = 0; k * cycleSamples < samples; k++) {
     const base = k * cycleSamples;
-    const center = base + 0.3 * cycleSamples;
-    // Very broad, tall R-like complex
-    addGaussian(arr, center - 10, -0.18, 5);
-    addGaussian(arr, center, 1.0, 20); // wide
-    addGaussian(arr, center + 10, -0.25, 6);
+    const center = base + 0.32 * cycleSamples;
+    const isCapture = k % captureEvery === 0 && Math.random() < 0.5;
+    const wideScale = isCapture ? 0.5 : 1.0;
+    const rHeight = isCapture ? 0.85 : randRange(0.9, 1.2);
+    addGaussian(arr, center - 12 * wideScale, -0.18, Math.max(4, Math.floor(6 * wideScale)));
+    addGaussian(arr, center, rHeight, Math.floor(18 * wideScale));
+    addGaussian(arr, center + 12 * wideScale, -0.28, Math.max(4, Math.floor(7 * wideScale)));
     rPeaks.push(Math.round(center));
-    // small T
-    addGaussian(arr, base + 0.62 * cycleSamples, 0.18, 18);
+    if (isCapture) {
+      // overlay narrow spike suggesting capture/fusion
+      addGaussian(arr, center - 2, 0.6, 4);
+    }
+    addGaussian(arr, base + 0.62 * cycleSamples, 0.15, 22);
   }
 
   // noise
@@ -218,8 +245,21 @@ function generateAsystole(seconds: number): GeneratedBuffer {
 }
 
 function generatePEA_narrow(seconds: number, hr = 50): GeneratedBuffer {
-  // Clinically there is electrical activity but no pulse; monitor looks like sinus brady (simplified)
-  return generateRegularECG(seconds, hr, 80, { amp: 0.9 });
+  // Electrical activity but no pulse; sinus-brady morphology
+  return generateRegularECG(seconds, hr, 85, { amp: 0.85, prMsMin: 140, prMsMax: 220 });
+}
+
+// SVT: regular narrow-complex tachycardia; P waves often hidden/retrograde
+function generateSVT(seconds: number, hr = 180): GeneratedBuffer {
+  const base = generateRegularECG(seconds, hr, 80, { pWave: false, amp: 0.95, prMsMin: 60, prMsMax: 120 });
+  const arr = base.buffer;
+  for (const rp of base.rPeaks) {
+    if (Math.random() < 0.3) {
+      // retrograde P just after QRS, small and often negative
+      addGaussian(arr, rp + Math.floor(0.06 * SAMPLE_RATE), -0.07, 8);
+    }
+  }
+  return base;
 }
 
 // Library of scenarios
@@ -237,7 +277,7 @@ const SCENARIOS: Record<
   [RHY.SINUS]: {
     label: "Normal Sinus (75 bpm)",
     desc: "Baseline for comparison.",
-    generator: () => generateRegularECG(BUFFER_SECONDS, 75, 80),
+    generator: () => generateRegularECG(BUFFER_SECONDS, 70 + Math.floor(randRange(-8, 8)), 85, { amp: 1.0, prMsMin: 120, prMsMax: 200 }),
     shockable: false,
     syncRecommended: false,
     syncable: true,
@@ -245,7 +285,7 @@ const SCENARIOS: Record<
   [RHY.SVT]: {
     label: "SVT ~180",
     desc: "Regular narrow-complex tachycardia.",
-    generator: () => generateRegularECG(BUFFER_SECONDS, 180, 70, { pWave: false, amp: 0.9 }),
+    generator: () => generateSVT(BUFFER_SECONDS, Math.floor(randRange(160, 210))),
     shockable: false,
     syncRecommended: true,
     syncable: true,
@@ -253,7 +293,7 @@ const SCENARIOS: Record<
   [RHY.AFIB_RVR]: {
     label: "Atrial Fibrillation (RVR)",
     desc: "Irregularly irregular narrow-complex.",
-    generator: () => generateAfibRvr(BUFFER_SECONDS, 150),
+    generator: () => generateAfibRvr(BUFFER_SECONDS, 140 + Math.floor(randRange(-20, 20))),
     shockable: false,
     syncRecommended: true,
     syncable: true,
@@ -261,7 +301,7 @@ const SCENARIOS: Record<
   [RHY.VT_PULSE]: {
     label: "Monomorphic VT (with pulse)",
     desc: "Wide-complex tachycardia, unstable → synchronized cardioversion.",
-    generator: () => generateVT(BUFFER_SECONDS, 160),
+    generator: () => generateVT(BUFFER_SECONDS, Math.floor(randRange(150, 185))),
     shockable: false,
     syncRecommended: true,
     syncable: true,
@@ -411,6 +451,10 @@ export default function CardiacMonitorDefibSimulator() {
   const [scenario, setScenario] = useState<RhythmId>(RHY.VF);
   const [status, setStatus] = useState<string>("Press CHARGE, then SHOCK. Use SYNC for cardioversion.");
   const [shockFlashTs, setShockFlashTs] = useState<number>(0);
+  // Modes & quiz state
+  const [mode, setMode] = useState<"practice" | "quiz">("practice");
+  const [diagChoice, setDiagChoice] = useState<RhythmId | "">("");
+  const [score, setScore] = useState({ dxCorrect: 0, dxTotal: 0, txCorrect: 0, txTotal: 0 });
 
   // Generate & memoize waveform for current scenario
   const gen = useMemo(() => SCENARIOS[scenario].generator, [scenario]);
@@ -584,6 +628,11 @@ export default function CardiacMonitorDefibSimulator() {
     );
 
     setScenario(nextRhythm);
+
+    // Quiz mode treatment scoring
+    if (mode === "quiz") {
+      setScore((s) => ({ ...s, txTotal: s.txTotal + 1, txCorrect: s.txCorrect + (appropriate ? 1 : 0) }));
+    }
   };
 
   // Keyboard shortcuts
@@ -613,9 +662,25 @@ export default function CardiacMonitorDefibSimulator() {
     ];
     const pick = pool[Math.floor(Math.random() * pool.length)];
     setScenario(pick);
-    setStatus(`Case loaded: ${SCENARIOS[pick].label}. ${SCENARIOS[pick].desc}`);
+    if (mode === "quiz") {
+      setStatus("New case loaded. Identify the rhythm, then treat appropriately.");
+      setDiagChoice("");
+    } else {
+      setStatus(`Case loaded: ${SCENARIOS[pick].label}. ${SCENARIOS[pick].desc}`);
+    }
     setCharged(false);
     setCharging(false);
+  };
+
+  const submitDiagnosis = () => {
+    if (!diagChoice) return;
+    const correct = diagChoice === scenario;
+    setScore((s) => ({ ...s, dxTotal: s.dxTotal + 1, dxCorrect: s.dxCorrect + (correct ? 1 : 0) }));
+    setStatus(
+      correct
+        ? "Diagnosis correct. Choose appropriate energy and treat."
+        : `Diagnosis incorrect. It was: ${SCENARIOS[scenario].label}. Consider appropriate management.`
+    );
   };
 
   // Canvas size responsive
@@ -644,7 +709,9 @@ export default function CardiacMonitorDefibSimulator() {
               <div className="text-lg font-semibold flex items-center gap-2">
                 <span className={`inline-block h-3 w-3 rounded-full ${powerOn ? "bg-emerald-400" : "bg-neutral-500"}`}></span>
                 Monitor
-                <span className="text-xs text-neutral-400 ml-2">{SCENARIOS[scenario].label}</span>
+                <span className="text-xs text-neutral-400 ml-2">
+                  {mode === "practice" ? SCENARIOS[scenario].label : "Identify rhythm"}
+                </span>
               </div>
               <div className="text-xs text-neutral-400">Speed: {speed} mm/s · Gain: {gain} mm/mV</div>
             </div>
@@ -679,33 +746,93 @@ export default function CardiacMonitorDefibSimulator() {
               </button>
             </div>
 
-            {/* Case controls */}
-            <div className="grid gap-2">
-              <label className="text-sm text-neutral-300">Load Rhythm</label>
-              <select
-                className="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2"
-                value={scenario}
-                onChange={(e) => {
-                  const v = e.target.value as RhythmId;
-                  setScenario(v);
-                  setStatus(`Loaded: ${SCENARIOS[v].label}. ${SCENARIOS[v].desc}`);
-                  setCharged(false);
-                  setCharging(false);
-                }}
-              >
-                {Object.entries(SCENARIOS).map(([id, meta]) => (
-                  <option key={id} value={id}>
-                    {meta.label}
-                  </option>
+            {/* Mode */}
+            <div>
+              <label className="text-sm text-neutral-300">Mode</label>
+              <div className="mt-1 flex gap-2">
+                {(["practice", "quiz"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => {
+                      setMode(m);
+                      setStatus(
+                        m === "practice"
+                          ? `Loaded: ${SCENARIOS[scenario].label}. ${SCENARIOS[scenario].desc}`
+                          : "Quiz mode: Identify the rhythm and treat."
+                      );
+                    }}
+                    className={`px-3 py-2 rounded-lg border ${
+                      mode === m ? "bg-neutral-50 text-neutral-900" : "bg-neutral-900 border-neutral-600"
+                    }`}
+                  >
+                    {m === "practice" ? "Practice" : "Quiz"}
+                  </button>
                 ))}
-              </select>
-              <button
-                onClick={randomCase}
-                className="mt-1 px-3 py-2 rounded-lg border border-neutral-600 bg-neutral-900 hover:bg-neutral-800"
-              >
-                Random Case (N)
-              </button>
+              </div>
             </div>
+
+            {/* Case controls */}
+            {mode === "practice" ? (
+              <div className="grid gap-2">
+                <label className="text-sm text-neutral-300">Load Rhythm</label>
+                <select
+                  className="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2"
+                  value={scenario}
+                  onChange={(e) => {
+                    const v = e.target.value as RhythmId;
+                    setScenario(v);
+                    setStatus(`Loaded: ${SCENARIOS[v].label}. ${SCENARIOS[v].desc}`);
+                    setCharged(false);
+                    setCharging(false);
+                  }}
+                >
+                  {Object.entries(SCENARIOS).map(([id, meta]) => (
+                    <option key={id} value={id}>
+                      {meta.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={randomCase}
+                  className="mt-1 px-3 py-2 rounded-lg border border-neutral-600 bg-neutral-900 hover:bg-neutral-800"
+                >
+                  Random Case (N)
+                </button>
+              </div>
+            ) : (
+              <div className="grid gap-2">
+                <label className="text-sm text-neutral-300">Diagnose the Rhythm</label>
+                <select
+                  className="bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2"
+                  value={diagChoice}
+                  onChange={(e) => setDiagChoice(e.target.value as RhythmId)}
+                >
+                  <option value="">Select…</option>
+                  {Object.entries(SCENARIOS).map(([id, meta]) => (
+                    <option key={id} value={id}>
+                      {meta.label}
+                    </option>
+                  ))}
+                </select>
+                <div className="flex gap-2">
+                  <button
+                    onClick={submitDiagnosis}
+                    className="px-3 py-2 rounded-lg border border-emerald-600 bg-emerald-700 hover:bg-emerald-600"
+                  >
+                    Submit Diagnosis
+                  </button>
+                  <button
+                    onClick={randomCase}
+                    className="px-3 py-2 rounded-lg border border-neutral-600 bg-neutral-900 hover:bg-neutral-800"
+                  >
+                    Next Case (N)
+                  </button>
+                </div>
+                <div className="text-xs text-neutral-400">
+                  Score — Dx: {score.dxCorrect}/{score.dxTotal} · Tx: {score.txCorrect}/{score.txTotal}
+                </div>
+              </div>
+            )}
 
             {/* Speed / Gain */}
             <div className="grid grid-cols-2 gap-3">
