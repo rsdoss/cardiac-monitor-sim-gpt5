@@ -430,6 +430,7 @@ export default function CardiacMonitorDefibSimulator() {
     const ctx = canvasRef.current?.getContext("2d");
     if (!ctx || !canvasRef.current) return;
 
+    // Keep a single rafId declaration
     let rafId = 0;
 
     const drawGrid = (w: number, h: number) => {
@@ -541,7 +542,7 @@ export default function CardiacMonitorDefibSimulator() {
       rafId = requestAnimationFrame(draw);
     };
 
-    let rafId = requestAnimationFrame(draw);
+    rafId = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(rafId);
   }, [powerOn, buffer, gain, speed, scenario, syncMode, shockFlashTs]);
 

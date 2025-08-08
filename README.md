@@ -2,7 +2,7 @@
 
 Educational simulator (React + Vite + TypeScript + Tailwind). Not a medical device.
 
-## Local Run
+## Local Run (requires Node >= 18)
 ```bash
 npm install
 npm run dev
