@@ -129,7 +129,7 @@ function generateAfibRvr(seconds: number, meanHr = 150): GeneratedBuffer {
   const meanRR = 60 / meanHr; // sec
   let t = 0;
   while (t * SAMPLE_RATE < samples) {
-    const rr = clamp(randRange(meanRR - 0.18, meanRR + 0.18), 0.28, 0.9);
+    const rr = Math.max(0.28, Math.min(0.9, randRange(meanRR - 0.18, meanRR + 0.18)));
     const rIndex = Math.floor(t * SAMPLE_RATE);
     // Narrow-ish QRS
     addGaussian(arr, rIndex - 6, -0.12, 4);
@@ -169,9 +169,9 @@ function generateVF(seconds: number): GeneratedBuffer {
       f1 = jitter(f1, 0.05);
       f2 = jitter(f2, 0.05);
       f3 = jitter(f3, 0.05);
-      a1 = clamp(jitter(a1, 0.08), 0.3, 1.1);
-      a2 = clamp(jitter(a2, 0.1), 0.1, 0.8);
-      a3 = clamp(jitter(a3, 0.12), 0.05, 0.6);
+      a1 = Math.max(0.3, Math.min(1.1, jitter(a1, 0.08)));
+      a2 = Math.max(0.1, Math.min(0.8, jitter(a2, 0.1)));
+      a3 = Math.max(0.05, Math.min(0.6, jitter(a3, 0.12)));
     }
     const val =
       a1 * Math.sin(2 * Math.PI * f1 * t + phi1) +
@@ -438,7 +438,7 @@ export default function CardiacMonitorDefibSimulator() {
       ctx.fillRect(0, 0, w, h);
 
       // minor grid
-      for (let x = 0; x < w; x += 10) {
+      for (let x = 0; x < w; x += GRID_MINOR_PX) {
         ctx.strokeStyle = "rgba(255,255,255,0.05)";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -446,7 +446,7 @@ export default function CardiacMonitorDefibSimulator() {
         ctx.lineTo(x + 0.5, h);
         ctx.stroke();
       }
-      for (let y = 0; y < h; y += 10) {
+      for (let y = 0; y < h; y += GRID_MINOR_PX) {
         ctx.strokeStyle = "rgba(255,255,255,0.05)";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -455,7 +455,7 @@ export default function CardiacMonitorDefibSimulator() {
         ctx.stroke();
       }
       // major grid
-      for (let x = 0; x < w; x += 10 * 5) {
+      for (let x = 0; x < w; x += GRID_MINOR_PX * GRID_MAJOR_EVERY) {
         ctx.strokeStyle = "rgba(255,255,255,0.12)";
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -463,7 +463,7 @@ export default function CardiacMonitorDefibSimulator() {
         ctx.lineTo(x + 0.5, h);
         ctx.stroke();
       }
-      for (let y = 0; y < h; y += 10 * 5) {
+      for (let y = 0; y < h; y += GRID_MINOR_PX * GRID_MAJOR_EVERY) {
         ctx.strokeStyle = "rgba(255,255,255,0.12)";
         ctx.lineWidth = 1.2;
         ctx.beginPath();
@@ -488,10 +488,9 @@ export default function CardiacMonitorDefibSimulator() {
       drawGrid(w, h);
 
       // Waveform style
-      const ctx2 = ctx;
-      ctx2.strokeStyle = "#00ff88";
-      ctx2.lineWidth = 2;
-      ctx2.beginPath();
+      ctx.strokeStyle = "#00ff88";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
 
       // Visible samples: map visibleSec across width
       const visSamples = Math.floor(visibleSec * SAMPLE_RATE);
@@ -505,27 +504,25 @@ export default function CardiacMonitorDefibSimulator() {
         const sampleOffset = Math.floor(frac * visSamples);
         const idx = (startIdx + sampleOffset) % buffer.length;
         const y = midY - buffer[idx] * gainScale;
-        if (px === 0) ctx2.moveTo(px, y);
-        else ctx2.lineTo(px, y);
+        if (px === 0) ctx.moveTo(px, y);
+        else ctx.lineTo(px, y);
       }
-      ctx2.stroke();
+      ctx.stroke();
 
       // Sync markers (if enabled and rhythm is syncable)
-      // We can't reference SCENARIOS in a nested helper here easily; reuse outer scope.
-      // Draw small yellow lines at R-peaks within visible window.
       if (syncMode && SCENARIOS[scenario].syncable) {
-        ctx2.strokeStyle = "#ffaa00";
-        ctx2.lineWidth = 1.5;
+        ctx.strokeStyle = "#ffaa00";
+        ctx.lineWidth = 1.5;
         const visStart = startIdx;
         const visEnd = (startIdx + visSamples) % buffer.length;
         const drawMarkerAt = (idx: number) => {
           let delta = idx - visStart;
           if (delta < 0) delta += buffer.length;
           const x = (delta / visSamples) * w;
-          ctx2.beginPath();
-          ctx2.moveTo(x + 0.5, 0);
-          ctx2.lineTo(x + 0.5, 18);
-          ctx2.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x + 0.5, 0);
+          ctx.lineTo(x + 0.5, 18);
+          ctx.stroke();
         };
         if (visStart < visEnd) {
           for (const rp of rPeaks) if (rp >= visStart && rp <= visEnd) drawMarkerAt(rp);
@@ -537,15 +534,15 @@ export default function CardiacMonitorDefibSimulator() {
       // Shock flash overlay
       if (shockFlashTs && ts - shockFlashTs < 160) {
         const alpha = 1 - (ts - shockFlashTs) / 160;
-        ctx2.fillStyle = `rgba(255,255,255,${alpha * 0.9})`;
-        ctx2.fillRect(0, 0, w, h);
+        ctx.fillStyle = `rgba(255,255,255,${alpha * 0.9})`;
+        ctx.fillRect(0, 0, w, h);
       }
 
-      requestAnimationFrame(draw);
+      rafId = requestAnimationFrame(draw);
     };
 
-    const rid = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(rid);
+    let rafId = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafId);
   }, [powerOn, buffer, gain, speed, scenario, syncMode, shockFlashTs]);
 
   // Handle charging
@@ -636,7 +633,6 @@ export default function CardiacMonitorDefibSimulator() {
     return () => ro.disconnect();
   }, []);
 
-  const canvasHeight = 240;
   return (
     <div className="w-full min-h-[720px] bg-neutral-900 text-neutral-100 p-4">
       <div className="max-w-6xl mx-auto grid grid-cols-1 xl:grid-cols-3 gap-4">
